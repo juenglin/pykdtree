@@ -47,16 +47,28 @@ jobs:
             cibw_archs: "aarch64"
           - os: ubuntu-22.04
             cibw_archs: "x86_64"
+          # riscv64 has no native GitHub-hosted runner; cibuildwheel builds it
+          # under QEMU on an x86_64 host. riscv64 build/test dependencies
+          # (numpy, Cython) are not on PyPI, so pull binaries from the RISE
+          # index via PIP_EXTRA_INDEX_URL (PyPI stays primary; pure-Python
+          # packages such as setuptools/pytest fall through to PyPI).
+          - os: ubuntu-24.04
+            cibw_archs: "riscv64"
+            cibw_environment: "PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/"
 
     steps:
       - uses: actions/checkout@v7
       - run: |
           git fetch --prune --unshallow
 
+      - name: Set up QEMU for emulated builds
+        if: matrix.cibw_archs == 'riscv64'
+        uses: docker/setup-qemu-action@v3
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.1.1
         env:
-          CIBW_SKIP: "*i686 *-musllinux_aarch64"
+          CIBW_SKIP: "*i686 *-musllinux_aarch64 *-musllinux_riscv64"
           CIBW_ARCHS: "${{ matrix.cibw_archs }}"
           CIBW_TEST_COMMAND: "pytest -v --pyargs pykdtree"
           CIBW_TEST_REQUIRES: "pytest mypy"
@@ -67,6 +79,14 @@ jobs:
           CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=14"
           CIBW_BEFORE_BUILD_MACOS: "brew install libomp"
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
+          # Per-arch Linux environment; empty for non-riscv64 entries so
+          # existing builds are unaffected. For riscv64 it carries the RISE
+          # extra index URL (and is also the place to add USE_OMP=0 if
+          # emulated OpenMP linking turns out to be a problem).
+          CIBW_ENVIRONMENT_LINUX: "${{ matrix.cibw_environment }}"
+          # Pin the riscv64 manylinux image explicitly for clarity (this is
+          # also cibuildwheel's default for the arch).
+          CIBW_MANYLINUX_RISCV64_IMAGE: "manylinux_2_39"
 
       - name: Upload wheel(s) as build artifacts
         uses: actions/upload-artifact@v7
