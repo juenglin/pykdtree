@@ -47,46 +47,73 @@ jobs:
             cibw_archs: "aarch64"
           - os: ubuntu-22.04
             cibw_archs: "x86_64"
-          # riscv64 has no native GitHub-hosted runner; cibuildwheel builds it
-          # under QEMU on an x86_64 host. riscv64 build/test dependencies
-          # (numpy, Cython) are not on PyPI, so pull binaries from the RISE
-          # index via PIP_EXTRA_INDEX_URL (PyPI stays primary; pure-Python
-          # packages such as setuptools/pytest fall through to PyPI).
-          - os: ubuntu-24.04
+          # riscv64 has no GitHub-hosted runner yet; to keep build times
+          # reasonable we dispatch to RISC-V hardware (ubuntu-24.04-riscv label,
+          # requires a RISE RISC-V GitHub App installed on the repo). numpy has
+          # no riscv64 wheels on PyPI, so pull it from the RISE index via
+          # PIP_EXTRA_INDEX_URL (PyPI stays primary; pure-Python packages such
+          # as Cython/pytest fall through to PyPI). PIP_PREFER_BINARY=1 makes
+          # pip pick the highest numpy version that has a riscv64 wheel instead
+          # of trying to build the latest numpy from sdist (which has no
+          # riscv64 wheel for older cp tags like cp39/cp310).
+          - os: ubuntu-24.04-riscv
             cibw_archs: "riscv64"
-            cibw_environment: "PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/"
+            cibw_environment: "PIP_EXTRA_INDEX_URL=https://pypi.riseproject.dev/simple/ PIP_PREFER_BINARY=1"
+
+    env:
+      # Single source of truth for the cibuildwheel version. The non-riscv64
+      # path pins the same version literally in `uses:` below (GitHub Actions
+      # forbids expressions in `uses:`); the drift-guard step fails the build
+      # if the two diverge.
+      CIBW_VERSION: "4.1.1"
+      CIBW_SKIP: "*i686 *-musllinux_aarch64 *-musllinux_riscv64"
+      CIBW_ARCHS: "${{ matrix.cibw_archs }}"
+      CIBW_TEST_COMMAND: "pytest -v --pyargs pykdtree"
+      CIBW_TEST_REQUIRES: "pytest mypy"
+      CIBW_TEST_SKIP: "*-win_arm64"
+      CIBW_BUILD_VERBOSITY: 1
+      # we use openmp (libomp) from homebrew which has a current limit of
+      # macos 14 (Sonoma) on intel: https://formulae.brew.sh/formula/libomp
+      CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=14"
+      CIBW_BEFORE_BUILD_MACOS: "brew install libomp"
+      CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
+      # Per-arch Linux environment; empty for non-riscv64 entries so
+      # existing builds are unaffected. For riscv64 it carries the RISE
+      # extra index URL (and is also the place to add USE_OMP=0 if
+      # OpenMP linking turns out to be a problem).
+      CIBW_ENVIRONMENT_LINUX: "${{ matrix.cibw_environment }}"
+      # Pin the riscv64 manylinux image explicitly for clarity (this is
+      # also cibuildwheel's default for the arch).
+      CIBW_MANYLINUX_RISCV64_IMAGE: "manylinux_2_39"
 
     steps:
       - uses: actions/checkout@v7
       - run: |
           git fetch --prune --unshallow
 
-      - name: Set up QEMU for emulated builds
-        if: matrix.cibw_archs == 'riscv64'
-        uses: docker/setup-qemu-action@v3
+      - name: Assert cibuildwheel versions match
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ref=$(grep -oE 'pypa/cibuildwheel@v[0-9.]+' .github/workflows/deploy-wheels.yml \
+                | grep -oE '[0-9.]+' | sort -u)
+          if [ "$ref" != "$CIBW_VERSION" ]; then
+            echo "cibuildwheel version drift: action ref=$ref, CIBW_VERSION=$CIBW_VERSION" >&2
+            exit 1
+          fi
 
       - name: Build wheels
+        if: matrix.cibw_archs != 'riscv64'
         uses: pypa/cibuildwheel@v4.1.1
-        env:
-          CIBW_SKIP: "*i686 *-musllinux_aarch64 *-musllinux_riscv64"
-          CIBW_ARCHS: "${{ matrix.cibw_archs }}"
-          CIBW_TEST_COMMAND: "pytest -v --pyargs pykdtree"
-          CIBW_TEST_REQUIRES: "pytest mypy"
-          CIBW_TEST_SKIP: "*-win_arm64"
-          CIBW_BUILD_VERBOSITY: 1
-          # we use openmp (libomp) from homebrew which has a current limit of
-          # macos 14 (Sonoma) on intel: https://formulae.brew.sh/formula/libomp
-          CIBW_ENVIRONMENT_MACOS: "MACOSX_DEPLOYMENT_TARGET=14"
-          CIBW_BEFORE_BUILD_MACOS: "brew install libomp"
-          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: ""
-          # Per-arch Linux environment; empty for non-riscv64 entries so
-          # existing builds are unaffected. For riscv64 it carries the RISE
-          # extra index URL (and is also the place to add USE_OMP=0 if
-          # emulated OpenMP linking turns out to be a problem).
-          CIBW_ENVIRONMENT_LINUX: "${{ matrix.cibw_environment }}"
-          # Pin the riscv64 manylinux image explicitly for clarity (this is
-          # also cibuildwheel's default for the arch).
-          CIBW_MANYLINUX_RISCV64_IMAGE: "manylinux_2_39"
+
+      - name: Build wheels (native riscv64)
+        if: matrix.cibw_archs == 'riscv64'
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cibw"
+          "$RUNNER_TEMP/cibw/bin/pip" install -q --upgrade pip
+          "$RUNNER_TEMP/cibw/bin/pip" install "cibuildwheel==${CIBW_VERSION}"
+          "$RUNNER_TEMP/cibw/bin/cibuildwheel" --output-dir wheelhouse
 
       - name: Upload wheel(s) as build artifacts
         uses: actions/upload-artifact@v7
